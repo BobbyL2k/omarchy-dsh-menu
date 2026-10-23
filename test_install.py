@@ -257,6 +257,31 @@ class InstallTests(unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
+    def test_webapp_token_uses_target_port_and_encodes_query_characters(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            install.apply_plan(install.build_plan(home, configuration(home)))
+            webapp = helper('dsh-webapp')
+            with patch.dict('os.environ', {'HOME': str(home)}), patch.object(webapp, 'seed_login'), patch.object(webapp.os, 'execvp') as execute:
+                for target, port in (('local', 4080), ('research', 4082)):
+                    with self.subTest(target=target), patch('sys.argv', ['dsh-webapp', target, 'abc+def/ghi==&other=#%']):
+                        webapp.main()
+                        self.assertIn(f'--app=http://localhost:{port}/?token=abc%2Bdef%2Fghi%3D%3D%26other%3D%23%25', execute.call_args.args[1])
+
+    def test_webapp_rejects_invalid_inputs_without_launching(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            install.apply_plan(install.build_plan(home, configuration(home)))
+            webapp = helper('dsh-webapp')
+            with patch.dict('os.environ', {'HOME': str(home)}), patch.object(webapp, 'seed_login'), patch.object(webapp.os, 'execvp') as execute:
+                for value in ('', ' ', 'token\n', 'https://localhost:4082/?token=test',
+                              'http://example.com:4082/?token=test', 'http://127.0.0.1:3080/?token=test',
+                              'http://user:pass@localhost:4082/', '//localhost:4082/', 'javascript:alert(1)'):
+                    with self.subTest(value=value), patch('sys.argv', ['dsh-webapp', 'research', value]):
+                        with self.assertRaises(SystemExit):
+                            webapp.main()
+                execute.assert_not_called()
+
     def test_stop_targets_only_the_named_remote(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
@@ -280,6 +305,9 @@ class HelperTests(unittest.TestCase):
                 with patch('sys.argv', ['dsh-webapp', 'research', 'http://localhost:4082/']):
                     webapp.main()
                 self.assertIn('--app=http://localhost:4082/', execute.call_args.args[1])
+                with patch('sys.argv', ['dsh-webapp', 'research', 'http://127.0.0.1:4082/?token=test']):
+                    webapp.main()
+                self.assertIn('--app=http://127.0.0.1:4082/?token=test', execute.call_args.args[1])
 
 
 if __name__ == '__main__':

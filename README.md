@@ -221,6 +221,14 @@ dsh-control research start
 dsh-webapp research 'http://localhost:3082/?token=YOUR_REMOTE_DSH_LOGIN_TOKEN'
 ```
 
+Alternatively, pass just the token; the launcher builds a login URL using `localhost` and the target's configured local port, URL-encoding the token:
+
+```bash
+dsh-webapp research 'YOUR_REMOTE_DSH_LOGIN_TOKEN'
+```
+
+Both forms use the same persistent browser profile. `dsh-webapp` does not start the service or tunnel; start it with `dsh-control TARGET start` first. Full URLs must still match the target's local port and use `localhost` or `127.0.0.1`.
+
 Use the configured target ID and local port. Login URLs are private. Later Open actions reuse the browser session. Reassigning a port to a different server may require authentication again.
 
 ## Installed files

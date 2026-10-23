@@ -6,7 +6,7 @@ from pathlib import Path
 import shlex
 import sqlite3
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from dsh_config import load_runtime, targets
 
@@ -49,8 +49,12 @@ def seed_login(profile):
 def main():
     available = targets(load_runtime())
     if len(sys.argv) != 3 or sys.argv[1] not in available:
-        raise SystemExit("Usage: dsh-webapp TARGET URL. Targets: " + ", ".join(available))
+        raise SystemExit("Usage: dsh-webapp TARGET URL_OR_TOKEN. Targets: " + ", ".join(available))
     target, url = sys.argv[1:]
+    if not url or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in url):
+        raise SystemExit("Provide a nonempty URL or token without whitespace or control characters.")
+    if '://' not in url and not urlsplit(url).scheme and not url.startswith('//'):
+        url = f"http://localhost:{available[target]['port']}/?" + urlencode({'token': url})
     parsed = urlsplit(url)
     if (parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1")
             or parsed.port != available[target]['port'] or parsed.username or parsed.password):
