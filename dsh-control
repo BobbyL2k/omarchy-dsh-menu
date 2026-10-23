@@ -1,0 +1,116 @@
+#!/usr/bin/python3
+"""Desktop controls for the local DSH service and the Remote SSH tunnel."""
+import json
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+config_path = Path.home() / ".config/dsh-menu/config.json"
+settings = json.loads(config_path.read_text()) if config_path.exists() else {}
+TARGETS = {
+    "local": ("dsh-local.service", settings.get("local_port", 3080)),
+    "remote": ("dsh-tunnel-remote.service", settings.get("tunnel_port", 3081)),
+}
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def active(unit):
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+
+
+def listening(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def ready(port):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1) as response:
+            return response.status == 200
+    except urllib.error.HTTPError as exc:
+        # DSH may require browser authentication even for its root page.
+        return exc.code == 401
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def notify(message, failed=False):
+    subprocess.run(["notify-send", "-a", "DeepSeek Harness", "-u",
+                    "critical" if failed else "normal", "DeepSeek Harness", message], check=False)
+
+
+def start(target):
+    unit, port = TARGETS[target]
+    if not active(unit):
+        if listening(port):
+            raise RuntimeError(f"Port {port} is already in use outside {unit}. Stop the manually started service or tunnel first.")
+        run("systemctl", "--user", "start", unit)
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        if not active(unit):
+            raise RuntimeError(f"{unit} stopped. Use the menu's Logs action to see why.")
+        if ready(port):
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"No web response on port {port} after 45 seconds. Check Logs; the service or tunnel may still be starting.")
+
+
+def local_url():
+    # DSH prints a per-process login URL. Keep it out of notifications and stdout.
+    unit = TARGETS["local"][0]
+    invocation = run("systemctl", "--user", "show", unit, "-p", "InvocationID", "--value",
+                     capture_output=True, text=True).stdout.strip()
+    if not invocation:
+        raise RuntimeError("Cannot identify the local service invocation. Try Stop, then Open again.")
+    logs = run("journalctl", "--user", f"_SYSTEMD_INVOCATION_ID={invocation}", "-o", "json", "--no-pager",
+               capture_output=True, text=True).stdout
+    for line in reversed(logs.splitlines()):
+        message = json.loads(line).get("MESSAGE", "")
+        match = re.search(rf"dsh web: (http://(?:localhost|127\.0\.0\.1):{TARGETS['local'][1]}/\S*)", message)
+        if match:
+            return match.group(1)
+    raise RuntimeError("The local service has not printed its login URL. Check Logs, then try Open again.")
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in TARGETS or sys.argv[2] not in ("start", "stop", "open", "logs", "status"):
+        raise RuntimeError("Usage: dsh-control {local|remote} {start|stop|open|logs|status}")
+    target, action = sys.argv[1:]
+    unit, port = TARGETS[target]
+    if action == "status":
+        print("running" if active(unit) else "stopped")
+    elif action == "logs":
+        run("omarchy-launch-terminal", "journalctl", "--user", "-u", unit, "-n", "60", "-f")
+    elif action == "stop":
+        run("systemctl", "--user", "stop", unit)
+        notify(f"{'Local service' if target == 'local' else 'Remote tunnel'} stopped.")
+    else:
+        start(target)
+        if action == "open":
+            url = local_url() if target == "local" else f"http://localhost:{port}/"
+            subprocess.Popen([str(Path.home() / ".local/bin/dsh-webapp"), target, url], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            notify(f"{'Local service' if target == 'local' else 'Remote tunnel'} ready on port {port}.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, subprocess.CalledProcessError, OSError) as exc:
+        # Do not expose command arguments: a browser command can contain a login token.
+        message = str(exc) if isinstance(exc, RuntimeError) else "Command failed. Check the service Logs from the menu."
+        print(message, file=sys.stderr)
+        notify(message, failed=True)
+        sys.exit(1)

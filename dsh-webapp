@@ -1,0 +1,75 @@
+#!/usr/bin/python3
+"""Launch labeled DSH app windows in a dedicated, persistent Chromium profile."""
+import json
+import os
+from pathlib import Path
+import shlex
+import sqlite3
+import sys
+from urllib.parse import urlsplit
+
+
+def seed_login(profile):
+    """Import only DSH loopback authentication cookies on first launch."""
+    marker = profile / ".dsh-login-imported"
+    if marker.exists():
+        return
+    source = Path.home() / ".config/chromium"
+    cookies = source / "Default/Cookies"
+    if not cookies.exists():
+        cookies = source / "Default/Network/Cookies"
+    profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+    destination = profile / "Default"
+    destination.mkdir(mode=0o700, exist_ok=True)
+    if cookies.exists() and not (destination / "Cookies").exists():
+        with sqlite3.connect(f"file:{cookies}?mode=ro", uri=True) as src:
+            with sqlite3.connect(destination / "Cookies") as dst:
+                for name in ("meta", "cookies"):
+                    schema = src.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()[0]
+                    dst.execute(schema)
+                rows = src.execute("SELECT * FROM meta").fetchall()
+                if rows:
+                    dst.executemany("INSERT INTO meta VALUES (" + ",".join("?" for _ in rows[0]) + ")", rows)
+                rows = src.execute("SELECT * FROM cookies WHERE host_key IN ('localhost','127.0.0.1') AND name LIKE 'dsh-auth-%'").fetchall()
+                if rows:
+                    dst.executemany("INSERT INTO cookies VALUES (" + ",".join("?" for _ in rows[0]) + ")", rows)
+                for (schema,) in src.execute("SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"):
+                    dst.execute(schema)
+        (destination / "Cookies").chmod(0o600)
+        # Preserve the encryption metadata needed to read the imported cookies.
+        state_path = source / "Local State"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        (profile / "Local State").write_text(json.dumps({"os_crypt": state.get("os_crypt", {})}))
+        (profile / "Local State").chmod(0o600)
+    marker.touch(mode=0o600)
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in ("local", "remote"):
+        raise SystemExit("Usage: dsh-webapp {local|remote} URL")
+    target, url = sys.argv[1:]
+    parsed = urlsplit(url)
+    config_path = Path.home() / ".config/dsh-menu/config.json"
+    settings = json.loads(config_path.read_text()) if config_path.exists() else {}
+    ports = {"local": settings.get("local_port", 3080), "remote": settings.get("tunnel_port", 3081)}
+    if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1") or parsed.port != ports[target]:
+        raise SystemExit("The webapp URL does not match its DSH target.")
+    home = Path.home()
+    profile = home / ".local/share/dsh-webapps"
+    seed_login(profile)
+    extensions = []
+    flags = home / ".config/chromium-flags.conf"
+    if flags.exists():
+        for line in flags.read_text().splitlines():
+            for flag in shlex.split(line, comments=True):
+                if flag.startswith("--load-extension="):
+                    extensions.extend(flag.partition("=")[2].split(","))
+    extensions.append(str(home / ".config/dsh-webapps/labels"))
+    args = ["uwsm-app", "--", "chromium", f"--user-data-dir={profile}",
+            "--no-first-run", "--no-default-browser-check",
+            "--load-extension=" + ",".join(dict.fromkeys(extensions)), f"--app={url}"]
+    os.execvp(args[0], args)
+
+
+if __name__ == "__main__":
+    main()
