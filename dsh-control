@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Desktop controls for the local DSH service and the Remote SSH tunnel."""
+"""Desktop controls for configured local and remote DSH targets."""
 import json
 from pathlib import Path
 import re
@@ -10,12 +10,11 @@ import time
 import urllib.error
 import urllib.request
 
-config_path = Path.home() / ".config/dsh-menu/config.json"
-settings = json.loads(config_path.read_text()) if config_path.exists() else {}
-TARGETS = {
-    "local": ("dsh-local.service", settings.get("local_port", 3080)),
-    "remote": ("dsh-tunnel-remote.service", settings.get("tunnel_port", 3081)),
-}
+from dsh_config import load_runtime, targets
+
+
+def configured_targets():
+    return targets(load_runtime())
 
 
 def run(*args, **kwargs):
@@ -51,7 +50,8 @@ def notify(message, failed=False):
 
 
 def start(target):
-    unit, port = TARGETS[target]
+    target_config = configured_targets()[target]
+    unit, port = target_config["unit"], target_config["port"]
     if not active(unit):
         if listening(port):
             raise RuntimeError(f"Port {port} is already in use outside {unit}. Stop the manually started service or tunnel first.")
@@ -68,7 +68,8 @@ def start(target):
 
 def local_url():
     # DSH prints a per-process login URL. Keep it out of notifications and stdout.
-    unit = TARGETS["local"][0]
+    local = configured_targets()["local"]
+    unit = local["unit"]
     invocation = run("systemctl", "--user", "show", unit, "-p", "InvocationID", "--value",
                      capture_output=True, text=True).stdout.strip()
     if not invocation:
@@ -77,24 +78,26 @@ def local_url():
                capture_output=True, text=True).stdout
     for line in reversed(logs.splitlines()):
         message = json.loads(line).get("MESSAGE", "")
-        match = re.search(rf"dsh web: (http://(?:localhost|127\.0\.0\.1):{TARGETS['local'][1]}/\S*)", message)
+        match = re.search(rf"dsh web: (http://(?:localhost|127\.0\.0\.1):{local['port']}/\S*)", message)
         if match:
             return match.group(1)
     raise RuntimeError("The local service has not printed its login URL. Check Logs, then try Open again.")
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in TARGETS or sys.argv[2] not in ("start", "stop", "open", "logs", "status"):
-        raise RuntimeError("Usage: dsh-control {local|remote} {start|stop|open|logs|status}")
+    available = configured_targets()
+    if len(sys.argv) != 3 or sys.argv[1] not in available or sys.argv[2] not in ("start", "stop", "open", "logs", "status"):
+        raise RuntimeError("Usage: dsh-control TARGET {start|stop|open|logs|status}. Targets: " + ", ".join(available))
     target, action = sys.argv[1:]
-    unit, port = TARGETS[target]
+    target_config = configured_targets()[target]
+    unit, port = target_config["unit"], target_config["port"]
     if action == "status":
         print("running" if active(unit) else "stopped")
     elif action == "logs":
         run("omarchy-launch-terminal", "journalctl", "--user", "-u", unit, "-n", "60", "-f")
     elif action == "stop":
         run("systemctl", "--user", "stop", unit)
-        notify(f"{'Local service' if target == 'local' else 'Remote tunnel'} stopped.")
+        notify(f"{target_config['label']} {'service' if target == 'local' else 'tunnel'} stopped.")
     else:
         start(target)
         if action == "open":
@@ -102,15 +105,15 @@ def main():
             subprocess.Popen([str(Path.home() / ".local/bin/dsh-webapp"), target, url], start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            notify(f"{'Local service' if target == 'local' else 'Remote tunnel'} ready on port {port}.")
+            notify(f"{target_config['label']} {'service' if target == 'local' else 'tunnel'} ready on port {port}.")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeError, subprocess.CalledProcessError, OSError) as exc:
+    except (ValueError, RuntimeError, subprocess.CalledProcessError, OSError) as exc:
         # Do not expose command arguments: a browser command can contain a login token.
-        message = str(exc) if isinstance(exc, RuntimeError) else "Command failed. Check the service Logs from the menu."
+        message = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else "Command failed. Check the service Logs from the menu."
         print(message, file=sys.stderr)
         notify(message, failed=True)
         sys.exit(1)

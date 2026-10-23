@@ -8,6 +8,8 @@ import sqlite3
 import sys
 from urllib.parse import urlsplit
 
+from dsh_config import load_runtime, targets
+
 
 def seed_login(profile):
     """Import only DSH loopback authentication cookies on first launch."""
@@ -45,14 +47,13 @@ def seed_login(profile):
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("local", "remote"):
-        raise SystemExit("Usage: dsh-webapp {local|remote} URL")
+    available = targets(load_runtime())
+    if len(sys.argv) != 3 or sys.argv[1] not in available:
+        raise SystemExit("Usage: dsh-webapp TARGET URL. Targets: " + ", ".join(available))
     target, url = sys.argv[1:]
     parsed = urlsplit(url)
-    config_path = Path.home() / ".config/dsh-menu/config.json"
-    settings = json.loads(config_path.read_text()) if config_path.exists() else {}
-    ports = {"local": settings.get("local_port", 3080), "remote": settings.get("tunnel_port", 3081)}
-    if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1") or parsed.port != ports[target]:
+    if (parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1")
+            or parsed.port != available[target]['port'] or parsed.username or parsed.password):
         raise SystemExit("The webapp URL does not match its DSH target.")
     home = Path.home()
     profile = home / ".local/share/dsh-webapps"
@@ -72,4 +73,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError) as exc:
+        raise SystemExit(str(exc)) from None

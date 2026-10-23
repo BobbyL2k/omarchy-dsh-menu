@@ -9,6 +9,9 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
+
+from dsh_config import config_dir, legacy_config, normalize, read_json, targets
 
 SOURCE = Path(__file__).resolve().parent
 
@@ -77,53 +80,49 @@ def unit_quote(value, environment=False):
     return '"' + text + '"'
 
 
-def menu_entries(home):
+def menu_entries(home, settings):
     control = shlex.quote(str(home / '.local/bin/dsh-control'))
     entries = {'dsh': {'icon': '', 'label': 'DeepSeek Harness'}}
-    for target, label, unit in (('local', 'Local', 'dsh-local'), ('remote', 'Remote', 'dsh-tunnel-remote')):
-        entries[f'dsh.{target}'] = {'label': label, 'checked': f'systemctl --user is-active --quiet {unit}.service'}
-        for action, title in (('open', 'Open webapp'), ('start', 'Start service' if target == 'local' else 'Start tunnel'),
-                              ('stop', 'Stop service' if target == 'local' else 'Stop tunnel'), ('logs', 'Logs')):
-            entries[f'dsh.{target}.{action}'] = {'label': title, 'action': f'{control} {target} {action}'}
+    for target_id, target in targets(settings).items():
+        entries[f'dsh.{target_id}'] = {'label': target['label'], 'checked': f"systemctl --user is-active --quiet {target['unit']}"}
+        for action, title in (('open', 'Open webapp'), ('start', 'Start service' if target_id == 'local' else 'Start tunnel'),
+                              ('stop', 'Stop service' if target_id == 'local' else 'Stop tunnel'), ('logs', 'Logs')):
+            entries[f'dsh.{target_id}.{action}'] = {'label': title, 'action': f'{control} {target_id} {action}'}
     return entries
 
 
-def build_plan(home, settings):
+def build_plan(home, settings, source_text=None):
     extension = home / '.config/omarchy/extensions/omarchy-menu.jsonc'
     original = extension.read_text() if extension.exists() else '{}'
     paths = [str(Path(settings['npx']).parent)]
     if shutil.which('node'):
         paths.append(str(Path(shutil.which('node')).parent))
     paths += [str(home / '.local/share/mise/shims'), '/usr/share/omarchy/bin', '/usr/local/bin', '/usr/bin']
-    local_command = [settings['npx'], '--offline', '--yes', '@deepseek-ai/dsh', 'web', '--host', '127.0.0.1',
-                     '--port', str(settings['local_port']), '--no-open']
-    tunnel_command = ['ssh', '-N', '-T', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=10',
-                      '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
-                      '-L', f"127.0.0.1:{settings['tunnel_port']}:localhost:{settings['remote_port']}", settings['ssh_host']]
-    units = home / '.config/systemd/user'
+    command = [settings['npx'], '--offline', '--yes', '@deepseek-ai/dsh', 'web', '--host', '127.0.0.1',
+               '--port', str(settings['local']['port']), '--no-open']
     local_unit = '[Unit]\nDescription=DeepSeek Harness local web service\n\n[Service]\nType=exec\n'
-    # WorkingDirectory is one path, not an argv list; systemd treats quotes
-    # here as literal filename characters. Interior spaces need no quoting.
-    local_unit += 'WorkingDirectory=' + settings['workdir'].replace('%', '%%') + '\n'
+    local_unit += 'WorkingDirectory=' + settings['local']['workdir'].replace('%', '%%') + '\n'
     local_unit += 'Environment=' + unit_quote('PATH=' + ':'.join(dict.fromkeys(paths)), environment=True) + '\n'
-    local_unit += 'ExecStart=' + ' '.join(map(unit_quote, local_command)) + '\nKillMode=control-group\nTimeoutStopSec=20\n'
-    tunnel_unit = '[Unit]\nDescription=DeepSeek Harness SSH tunnel\n\n[Service]\nType=exec\n'
-    tunnel_unit += 'ExecStart=' + ' '.join(map(unit_quote, tunnel_command)) + '\nKillMode=control-group\nTimeoutStopSec=10\n'
-    targets = {
-        str(settings['local_port']): {'label': 'Local', 'detail': 'This computer', 'color': '#71d6af', 'background': '#102820'},
-        str(settings['tunnel_port']): {'label': 'Remote', 'detail': 'SSH · ' + settings['ssh_host'], 'color': '#99baff', 'background': '#17243b'},
-    }
-    plan = {
-        home / '.config/dsh-menu/config.json': json.dumps(settings, indent=2) + '\n',
-        extension: update_menu(original, menu_entries(home)),
-        units / 'dsh-local.service': local_unit,
-        units / 'dsh-tunnel-remote.service': tunnel_unit,
-        home / '.config/dsh-webapps/labels/targets.js': 'globalThis.DSH_MENU_TARGETS = ' + json.dumps(targets, ensure_ascii=False) + ';\n',
-    }
-    for name in ('dsh-control', 'dsh-webapp'):
+    local_unit += 'ExecStart=' + ' '.join(map(unit_quote, command)) + '\nKillMode=control-group\nTimeoutStopSec=20\n'
+    units = home / '.config/systemd/user'
+    plan = {config_dir(home) / 'config.json': source_text if source_text is not None else json.dumps(settings, indent=2) + '\n',
+            config_dir(home) / 'runtime.json': json.dumps(settings, indent=2) + '\n',
+            extension: update_menu(original, menu_entries(home, settings)), units / 'dsh-local.service': local_unit}
+    for target_id, remote in settings['remotes'].items():
+        command = ['ssh', '-N', '-T', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=10',
+                   '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+                   '-L', f"127.0.0.1:{remote['local_port']}:localhost:{remote['remote_port']}", remote['ssh_host']]
+        text = '[Unit]\nDescription=DeepSeek Harness SSH tunnel\n\n[Service]\nType=exec\n'
+        text += 'ExecStart=' + ' '.join(map(unit_quote, command)) + '\nKillMode=control-group\nTimeoutStopSec=10\n'
+        plan[units / f'dsh-tunnel-{target_id}.service'] = text
+    mapping = {str(t['port']): {key: t[key] for key in ('label', 'detail', 'color', 'background')} for t in targets(settings).values()}
+    plan[home / '.config/dsh-webapps/labels/targets.js'] = 'globalThis.DSH_MENU_TARGETS = ' + json.dumps(mapping, ensure_ascii=False) + ';\n'
+    for name in ('dsh_config.py', 'dsh-control', 'dsh-webapp'):
         plan[home / '.local/bin' / name] = (SOURCE / name).read_text()
     for name in ('manifest.json', 'labels.js'):
         plan[home / '.config/dsh-webapps/labels' / name] = (SOURCE / 'labels' / name).read_text()
+    # Ownership is explicit: removing a remote must not delete unrelated units.
+    plan[config_dir(home) / 'installed.json'] = json.dumps({'units': sorted(t['unit'] for t in targets(settings).values())}, indent=2) + '\n'
     return plan
 
 
@@ -136,66 +135,140 @@ def apply_plan(plan):
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             shutil.copy2(path, path.with_name(path.name + '.bak.' + stamp))
-        path.write_text(text)
+        temporary = path.with_name(path.name + '.tmp.' + stamp)
+        try:
+            temporary.write_text(text)
+            temporary.chmod(path.stat().st_mode & 0o777 if path.exists() else 0o644)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         changed.append(path)
     for path in plan:
-        if path.parent.name == 'bin':
+        if path.name in ('dsh-control', 'dsh-webapp'):
             path.chmod(0o755)
     return changed
 
 
+def owned_units(home):
+    state = config_dir(home) / 'installed.json'
+    names = set()
+    if state.exists():
+        data = read_json(state)
+        if not isinstance(data, dict) or not isinstance(data.get('units'), list) or not all(isinstance(name, str) for name in data['units']):
+            raise ValueError('Invalid DSH Menu ownership state')
+        names.update(data['units'])
+    else:
+        # Adopt an earlier install using only its owned menu entries and units.
+        extension = home / '.config/omarchy/extensions/omarchy-menu.jsonc'
+        if extension.exists():
+            for key, row in json.loads(clean_jsonc(extension.read_text())).items():
+                if key.startswith('dsh.') and isinstance(row, dict):
+                    match = re.fullmatch(r'systemctl --user is-active --quiet (dsh-[a-z0-9-]+\.service)', row.get('checked', ''))
+                    if match:
+                        path = home / '.config/systemd/user' / match[1]
+                        if path.exists() and re.search(r'^Description=DeepSeek Harness ', path.read_text(), re.M):
+                            names.add(match[1])
+    if any(not re.fullmatch(r'dsh-(?:local|tunnel-[a-z][a-z0-9-]{0,47})\.service', name) for name in names):
+        raise ValueError('Invalid unit name in DSH Menu ownership state')
+    return names
+
+
+def service_changes(home, plan, previous):
+    desired = {p.name for p in plan if p.suffix == '.service'}
+    changed = {p.name for p, text in plan.items() if p.suffix == '.service' and (not p.exists() or p.read_text() != text)}
+    return desired, changed, previous - desired
+
+
+def sync_install(home, plan, migrate=False, runner=None):
+    runner = runner or subprocess.run
+    previous = owned_units(home)
+    desired, changed, obsolete = service_changes(home, plan, previous)
+    for path in plan:
+        if path.suffix == '.service' and path.exists() and path.name not in previous:
+            if not re.search(r'^Description=DeepSeek Harness ', path.read_text(), re.M):
+                raise ValueError(f'Refusing to replace an unmanaged service: {path.name}')
+    def active(unit):
+        return runner(['systemctl', '--user', 'is-active', '--quiet', unit], check=False).returncode == 0
+    running = {unit for unit in previous | desired if active(unit)}
+    restart = changed & running & desired
+    # Single-remote legacy migration preserves its running/stopped state even
+    # when the old installation used a different generated unit name.
+    old_remote = previous - {'dsh-local.service'}
+    new_remote = desired - {'dsh-local.service'}
+    if migrate and len(old_remote) == len(new_remote) == 1 and old_remote & running:
+        restart.update(new_remote)
+    stopped = sorted((obsolete | changed) & running)
+    if stopped:
+        runner(['systemctl', '--user', 'stop', *stopped], check=True)
+    for unit in sorted(obsolete):
+        enabled = runner(['systemctl', '--user', 'is-enabled', unit], check=False,
+                         capture_output=True, text=True)
+        if (enabled.stdout or '').strip() in ('enabled', 'enabled-runtime'):
+            runner(['systemctl', '--user', 'disable', unit], check=True)
+    updated = apply_plan(plan)
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    for unit in sorted(obsolete):
+        path = home / '.config/systemd/user' / unit
+        if path.exists():
+            shutil.copy2(path, path.with_name(path.name + '.bak.' + stamp))
+            path.unlink()
+    if updated or obsolete:
+        runner(['systemctl', '--user', 'daemon-reload'], check=True)
+    if restart:
+        runner(['systemctl', '--user', 'start', *sorted(restart)], check=True)
+    return updated, obsolete, restart
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--ssh-host', help='SSH alias for Remote (default: remote)')
-    parser.add_argument('--local-port', type=int, help='Local DSH port (default: 3080)')
-    parser.add_argument('--tunnel-port', type=int, help='Local forwarded port (default: 3081)')
-    parser.add_argument('--remote-port', type=int, help='DSH port on the remote host (default: 3080)')
-    parser.add_argument('--workdir', help='Local DSH working directory (default: ~/Projects)')
-    parser.add_argument('--npx', help='Path to npx (default: mise shim, then PATH)')
-    parser.add_argument('--prepare-dsh', action='store_true', help='Download/prepare DSH via npx before installing (requires network)')
-    parser.add_argument('--dry-run', action='store_true', help='Validate and list files without writing or downloading')
+    parser.add_argument('--config', type=Path, help='Import settings from a JSON file; later installs use the saved config')
+    parser.add_argument('--prepare-dsh', action='store_true', help='Download/prepare DSH via npx (requires network)')
+    parser.add_argument('--dry-run', action='store_true', help='Validate and preview without writing, downloading, or stopping services')
     args = parser.parse_args()
     home = Path.home()
-    config = home / '.config/dsh-menu/config.json'
-    previous = json.loads(config.read_text()) if config.exists() else {}
-    shim = home / '.local/share/mise/shims/npx'
-    settings = {'ssh_host': 'remote', 'local_port': 3080, 'tunnel_port': 3081, 'remote_port': 3080,
-                'workdir': str(home / 'Projects'), 'npx': str(shim) if shim.exists() else shutil.which('npx'), **previous}
-    for name in ('ssh_host', 'local_port', 'tunnel_port', 'remote_port', 'workdir', 'npx'):
-        if getattr(args, name) is not None:
-            settings[name] = getattr(args, name)
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@:-]*', settings['ssh_host']):
-        parser.error('Use an SSH alias, such as remote or user@hostname.')
-    if any(not 1024 <= settings[p] <= 65535 for p in ('local_port', 'tunnel_port', 'remote_port')):
-        parser.error('Ports must be between 1024 and 65535.')
-    if settings['local_port'] == settings['tunnel_port']:
-        parser.error('Local DSH and the tunnel need different local ports.')
-    missing = [name for name in ('node', 'chromium', 'ssh', 'systemctl', 'journalctl', 'notify-send',
-                                 'uwsm-app', 'omarchy-menu', 'omarchy-launch-terminal') if not shutil.which(name)]
-    if not settings['npx'] or not os.access(os.path.expanduser(settings['npx']), os.X_OK):
-        missing.append('npx')
-    if missing:
-        parser.error('Missing dependencies: ' + ', '.join(missing) + '. See README.md.')
-    settings['workdir'] = os.path.abspath(os.path.expanduser(settings['workdir']))
-    settings['npx'] = os.path.abspath(os.path.expanduser(settings['npx']))
-    if any('\n' in str(v) or '\r' in str(v) for v in settings.values()):
-        parser.error('Settings cannot contain newlines.')
-    plan = build_plan(home, settings)
-    if args.dry_run:
-        print(json.dumps(settings, indent=2))
-        print('\nWould install/update:\n' + '\n'.join(str(p) for p in plan))
-        return
-    subprocess.run(['systemctl', '--user', 'show-environment'], check=True, stdout=subprocess.DEVNULL)
-    if args.prepare_dsh:
-        subprocess.run([settings['npx'], '--yes', '@deepseek-ai/dsh', 'web', '--help'], check=True)
-    Path(settings['workdir']).mkdir(parents=True, exist_ok=True)
-    changed = apply_plan(plan)
-    subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
-    print(f'Installed DSH Menu ({len(changed)} files updated). No services started or enabled at login.')
-    print('Open: Win + Space → DeepSeek Harness, or: omarchy menu summon dsh')
-    print('Stop/start running services to apply changed unit settings.')
-    if not args.prepare_dsh:
-        print('DSH must already be cached. For a fresh machine, use --prepare-dsh.')
+    source = args.config.expanduser() if args.config else config_dir(home) / 'config.json'
+    try:
+        raw = read_json(source) if source.exists() else {}
+        if args.config and not source.exists():
+            raise ValueError(f'Configuration file does not exist: {source}')
+        migrate = legacy_config(raw)
+        settings = normalize(raw, home)
+        text = source.read_text() if source.exists() and not migrate else None
+        plan = build_plan(home, settings, text)
+        previous = owned_units(home)
+        desired, changed, obsolete = service_changes(home, plan, previous)
+        missing = [name for name in ('node', 'chromium', 'ssh', 'systemctl', 'systemd-analyze', 'journalctl',
+                                     'notify-send', 'uwsm-app', 'omarchy-menu', 'omarchy-launch-terminal') if not shutil.which(name)]
+        if not settings['npx'] or not os.access(settings['npx'], os.X_OK):
+            missing.append('npx')
+        if missing:
+            raise ValueError('Missing dependencies: ' + ', '.join(missing) + '. See README.md.')
+        if args.dry_run:
+            print('Targets: ' + ', '.join(f"{key} ({target['label']}, port {target['port']})" for key, target in targets(settings).items()))
+            print('Would update:')
+            print('\n'.join(str(path) for path, text in plan.items() if not path.exists() or path.read_text() != text) or '(no files)')
+            print('Would remove obsolete units: ' + (', '.join(sorted(obsolete)) or '(none)'))
+            print('Changed service definitions (restarted only if already running): ' + (', '.join(sorted(changed)) or '(none)'))
+            return
+        subprocess.run(['systemctl', '--user', 'show-environment'], check=True, stdout=subprocess.DEVNULL)
+        # Check every generated service before touching installed files or services.
+        with tempfile.TemporaryDirectory(prefix='dsh-menu-verify-') as folder:
+            files = []
+            for path, body in plan.items():
+                if path.suffix == '.service':
+                    staged = Path(folder) / path.name
+                    staged.write_text(body)
+                    files.append(str(staged))
+            subprocess.run(['systemd-analyze', '--user', 'verify', *files], check=True)
+        if args.prepare_dsh:
+            subprocess.run([settings['npx'], '--yes', '@deepseek-ai/dsh', 'web', '--help'], check=True)
+        Path(settings['local']['workdir']).mkdir(parents=True, exist_ok=True)
+        updated, obsolete, restarted = sync_install(home, plan, migrate)
+        print(f'DSH Menu synced: {len(updated)} files updated, {len(obsolete)} obsolete units removed, {len(restarted)} active services refreshed.')
+        print('New targets remain stopped. Open them from Win + Space → DeepSeek Harness.')
+        print('After label/port changes, close all dedicated DSH browser windows and reopen them.')
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, f'Installation failed: {exc}\n')
 
 
 if __name__ == '__main__':

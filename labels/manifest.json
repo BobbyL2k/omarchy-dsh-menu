@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "DeepSeek Harness window labels",
   "version": "1.0.0",
-  "description": "Persistent Local and Remote headers for the DSH webapps.",
+  "description": "Persistent named connection headers for DSH webapps.",
   "content_scripts": [{
     "matches": ["http://localhost/*", "http://127.0.0.1/*"],
     "js": ["targets.js", "labels.js"],

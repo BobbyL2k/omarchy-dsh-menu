@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "local": {
+    "label": "Local",
+    "port": 3080,
+    "workdir": "~/Projects"
+  },
+  "remotes": {
+    "development": {
+      "label": "Development",
+      "ssh_host": "dev-server",
+      "local_port": 3081,
+      "remote_port": 3080,
+      "color": "#99baff"
+    },
+    "research": {
+      "label": "Research",
+      "ssh_host": "research-server",
+      "local_port": 3082,
+      "remote_port": 3080,
+      "color": "#dfb0ff"
+    }
+  }
+}

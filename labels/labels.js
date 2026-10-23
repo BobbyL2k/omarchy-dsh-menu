@@ -1,16 +1,13 @@
 (() => {
   "use strict";
-  const targets = globalThis.DSH_MENU_TARGETS || {
-    "3080": { label: "Local", detail: "This computer", color: "#71d6af", background: "#102820" },
-    "3081": { label: "Remote", detail: "SSH · remote", color: "#99baff", background: "#17243b" },
-  };
+  const targets = globalThis.DSH_MENU_TARGETS || {};
   const target = targets[location.port];
   if (!target || !["localhost", "127.0.0.1"].includes(location.hostname)) return;
 
   const prefix = `[DSH · ${target.label}] `;
   function labelTitle() {
     if (!document.title.startsWith(prefix)) {
-      document.title = prefix + document.title.replace(/^\[DSH · (Local|Remote)\] /, "");
+      document.title = prefix + document.title.replace(/^\[DSH · [^\]]*\] /, "");
     }
   }
 
