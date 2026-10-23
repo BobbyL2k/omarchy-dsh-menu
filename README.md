@@ -2,7 +2,7 @@
 
 Desktop controls for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): manage a local DSH service and SSH tunnels to any number of remote instances, then open each connection in a named app window.
 
-Each target gets **Open webapp**, **Start**, **Stop**, **Logs**, and login startup controls. Persistent colored headers and window-title prefixes identify the connection, including during navigation and session changes.
+Each target gets **Open webapp**, **Start**, **Stop**, **Logs**, and login startup controls; the local target also gets **Update DSH**. Persistent colored headers and window-title prefixes identify the connection, including during navigation and session changes.
 
 ## Requirements
 
@@ -188,6 +188,7 @@ An earlier managed tunnel unit is adopted from the existing app menu, backed up,
 | Start | Starts local DSH | Starts only that target's tunnel |
 | Stop | Stops local DSH and its child processes | Stops only that target's tunnel |
 | Logs | Opens local DSH logs | Opens that target's SSH tunnel logs |
+| Update DSH (local only) | Stops the service, fetches the newest DSH into the npm cache, and restarts; notifies the old → new version | Not offered; remote DSH updates on its own host |
 | Enable/Disable at login | Controls local service autostart | Controls tunnel autostart |
 
 A checkmark means the service or tunnel process is active, not that the remote server is continuously health-checked. Closing an app window leaves its service/tunnel running. Enable/Disable at login affects future logins without starting or stopping the current session. New targets are disabled by default.
@@ -207,9 +208,14 @@ dsh-control research logs
 dsh-control research stop
 dsh-control research enable
 dsh-control research disable
+dsh-control local update
 ```
 
-Supported actions are `open`, `start`, `stop`, `status`, `logs`, `enable`, and `disable`. Running a command without valid arguments prints the available target IDs. Press **Ctrl + C** to stop watching logs. Logs can contain private DSH login URLs.
+Supported actions are `open`, `start`, `stop`, `status`, `logs`, `enable`, `disable`, and — for the local target only — `update`. Running a command without valid arguments prints the available target IDs. Press **Ctrl + C** to stop watching logs. Logs can contain private DSH login URLs.
+
+### Updating local DSH
+
+**Update DSH** in the Local submenu refreshes the npm-cached package the offline service starts from, using the same unversioned `@deepseek-ai/dsh` spec the service launches with. The local service is stopped while the fetch runs (up to 10 minutes), then restarted when it succeeds. If the version is unchanged, you are notified that DSH is already up to date; if the fetch fails, the service is restarted on its previous version. The action affects only this computer — remote instances keep being updated on their own hosts. The package is unpinned, so there is no rollback to a previous version.
 
 ### Browser authentication
 

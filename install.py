@@ -88,6 +88,9 @@ def menu_entries(home, settings):
         for action, title in (('open', 'Open webapp'), ('start', 'Start service' if target_id == 'local' else 'Start tunnel'),
                               ('stop', 'Stop service' if target_id == 'local' else 'Stop tunnel'), ('logs', 'Logs')):
             entries[f'dsh.{target_id}.{action}'] = {'label': title, 'action': f'{control} {target_id} {action}'}
+        if target_id == 'local':
+            # Only the local DSH install is managed here; remotes update on their own hosts.
+            entries['dsh.local.update'] = {'label': 'Update DSH', 'action': f'{control} local update'}
         enabled = f"systemctl --user is-enabled --quiet {target['unit']}"
         entries[f'dsh.{target_id}.enable'] = {'label': 'Enable at login', 'when': f'! {enabled}',
                                                 'action': f'{control} {target_id} enable'}

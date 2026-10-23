@@ -12,6 +12,8 @@ import urllib.request
 
 from dsh_config import load_runtime, targets
 
+REFRESH_TIMEOUT = 600
+
 
 def configured_targets():
     return targets(load_runtime())
@@ -84,10 +86,61 @@ def local_url():
     raise RuntimeError("The local service has not printed its login URL. Check Logs, then try Open again.")
 
 
+def installed_version(home):
+    # npx derives its cache directory from the exact package spec, so this
+    # matches the unversioned spec the service launches DSH with.
+    root = home / ".npm/_npx"
+    versions = set()
+    for manifest in () if not root.is_dir() else root.glob("*/node_modules/@deepseek-ai/dsh/package.json"):
+        try:
+            version = json.loads(manifest.read_text()).get("version")
+        except (ValueError, OSError):
+            continue
+        if isinstance(version, str) and version:
+            versions.add(version)
+    if len(versions) != 1:
+        raise RuntimeError("Cannot determine the installed DSH version. Check Logs; the npm cache may be missing or contain conflicting copies.")
+    return versions.pop()
+
+
+def refresh(npx):
+    # Unlike the service, this call is deliberately online: it repopulates the
+    # npx cache the offline service later starts from. The package spec must
+    # match ExecStart exactly, or npx fills a cache directory the service never
+    # reads. Output is captured so it never reaches notifications.
+    result = subprocess.run([npx, "--yes", "@deepseek-ai/dsh", "web", "--help"], capture_output=True, text=True,
+                            timeout=REFRESH_TIMEOUT)
+    if result.returncode != 0:
+        raise RuntimeError("Fetching the latest DSH failed. The service was left on its previous version; check Logs.")
+
+
+def update(npx, home=None):
+    home = home or Path.home()
+    previous = installed_version(home)
+    notify(f"Updating DSH from {previous}. The local service is paused while the new version is fetched; this may take up to {REFRESH_TIMEOUT // 60} minutes.", failed=False)
+    was_active = active("dsh-local.service")
+    if was_active:
+        run("systemctl", "--user", "stop", "dsh-local.service")
+    try:
+        refresh(npx)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        if was_active:
+            subprocess.run(["systemctl", "--user", "start", "dsh-local.service"], check=False)
+        raise
+    current = installed_version(home)
+    if was_active:
+        start("local")
+    restored = " The local service is running again." if was_active else ""
+    if current == previous:
+        notify(f"DSH is already up to date ({previous}).{restored}")
+    else:
+        notify(f"Updated DSH {previous} to {current}." + ("" if was_active else " Start it from the menu when you are ready."))
+
+
 def main():
     available = configured_targets()
-    if len(sys.argv) != 3 or sys.argv[1] not in available or sys.argv[2] not in ("start", "stop", "open", "logs", "status", "enable", "disable"):
-        raise RuntimeError("Usage: dsh-control TARGET {start|stop|open|logs|status|enable|disable}. Targets: " + ", ".join(available))
+    if len(sys.argv) != 3 or sys.argv[1] not in available or sys.argv[2] not in ("start", "stop", "open", "logs", "status", "enable", "disable", "update"):
+        raise RuntimeError("Usage: dsh-control TARGET {start|stop|open|logs|status|enable|disable|update}. Targets: " + ", ".join(available))
     target, action = sys.argv[1:]
     target_config = configured_targets()[target]
     unit, port = target_config["unit"], target_config["port"]
@@ -95,6 +148,10 @@ def main():
         print("running" if active(unit) else "stopped")
     elif action == "logs":
         run("omarchy-launch-terminal", "journalctl", "--user", "-u", unit, "-n", "60", "-f")
+    elif action == "update":
+        if target != "local":
+            raise RuntimeError("Only the local target can be updated from this menu. Remote DSH installs are managed on their own hosts.")
+        update(load_runtime()["npx"])
     elif action in ("enable", "disable"):
         run("systemctl", "--user", action, unit)
         notify(f"{target_config['label']} {'enabled' if action == 'enable' else 'disabled'} at login.")

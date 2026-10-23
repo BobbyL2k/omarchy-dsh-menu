@@ -124,6 +124,14 @@ class InstallTests(unittest.TestCase):
                                  f'systemctl --user is-enabled --quiet {unit}')
                 self.assertIn('[Install]\nWantedBy=default.target', plan[home / '.config/systemd/user' / unit])
 
+    def test_update_entry_is_local_only(self):
+        home = Path('/home/example')
+        entries = install.menu_entries(home, configuration(home))
+        self.assertEqual(entries['dsh.local.update'],
+                         {'label': 'Update DSH', 'action': '/home/example/.local/bin/dsh-control local update'})
+        self.assertEqual([key for key in entries if key.endswith('.update')], ['dsh.local.update'])
+        self.assertIn('dsh.local.update', install.menu_entries(home, normalize({'npx': '/usr/bin/true'}, home)))
+
     def test_jsonc_merge_preserves_unrelated_strings_and_comments(self):
         original = '''{
  // Keep personal shortcuts.
@@ -334,6 +342,87 @@ class HelperTests(unittest.TestCase):
                 with patch('sys.argv', ['dsh-webapp', 'research', 'http://127.0.0.1:4082/?token=test']):
                     webapp.main()
                 self.assertIn('--app=http://127.0.0.1:4082/?token=test', execute.call_args.args[1])
+
+    def seed_dsh_version(self, home, version):
+        manifest = home / '.npm/_npx/fixedhash/node_modules/@deepseek-ai/dsh'
+        manifest.mkdir(parents=True, exist_ok=True)
+        (manifest / 'package.json').write_text(json.dumps({'name': '@deepseek-ai/dsh', 'version': version}))
+
+    def test_update_stops_refreshes_and_restarts_on_new_version(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            install.apply_plan(install.build_plan(home, configuration(home)))
+            self.seed_dsh_version(home, '0.1.0')
+            control = helper('dsh-control')
+            self.assertEqual(control.REFRESH_TIMEOUT, 600)
+
+            def refresh(npx):
+                self.seed_dsh_version(home, '0.2.0')
+
+            with patch.dict('os.environ', {'HOME': str(home)}), \
+                    patch.object(control, 'active', return_value=True), \
+                    patch.object(control, 'run') as run, \
+                    patch.object(control, 'start') as start, \
+                    patch.object(control, 'refresh', side_effect=refresh), \
+                    patch.object(control, 'notify') as notify:
+                control.update('/usr/bin/true', home)
+            run.assert_called_once_with('systemctl', '--user', 'stop', 'dsh-local.service')
+            start.assert_called_once_with('local')
+            self.assertIn('0.1.0 to 0.2.0', notify.call_args.args[0])
+
+    def test_update_unchanged_version_reports_current_and_restarts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            install.apply_plan(install.build_plan(home, configuration(home)))
+            self.seed_dsh_version(home, '0.1.0')
+            control = helper('dsh-control')
+            with patch.dict('os.environ', {'HOME': str(home)}), \
+                    patch.object(control, 'active', return_value=True), \
+                    patch.object(control, 'run'), \
+                    patch.object(control, 'start') as start, \
+                    patch.object(control, 'refresh') as refresh, \
+                    patch.object(control, 'notify') as notify:
+                control.update('/usr/bin/true', home)
+            refresh.assert_called_once_with('/usr/bin/true')
+            start.assert_called_once_with('local')
+            self.assertIn('already up to date (0.1.0)', notify.call_args.args[0])
+
+    def test_failed_update_restarts_previous_service_and_raises(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            install.apply_plan(install.build_plan(home, configuration(home)))
+            self.seed_dsh_version(home, '0.1.0')
+            control = helper('dsh-control')
+            with patch.dict('os.environ', {'HOME': str(home)}), \
+                    patch.object(control, 'active', return_value=True), \
+                    patch.object(control, 'run'), \
+                    patch.object(control, 'refresh', side_effect=RuntimeError('fetch failed')), \
+                    patch.object(control.subprocess, 'run') as best_effort, \
+                    patch.object(control, 'notify'):
+                with self.assertRaises(RuntimeError):
+                    control.update('/usr/bin/true', home)
+            best_effort.assert_called_once_with(['systemctl', '--user', 'start', 'dsh-local.service'], check=False)
+
+    def test_refresh_fetches_the_exact_service_package_spec(self):
+        control = helper('dsh-control')
+        with patch.object(control.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            control.refresh('/usr/bin/npx')
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ['/usr/bin/npx', '--yes', '@deepseek-ai/dsh', 'web'])
+        self.assertNotIn('--offline', command)
+        self.assertEqual(run.call_args.kwargs['timeout'], control.REFRESH_TIMEOUT)
+        with patch.object(control.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)):
+            with self.assertRaises(RuntimeError):
+                control.refresh('/usr/bin/npx')
+
+    def test_update_rejects_remote_targets_at_the_entry_point(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            install.apply_plan(install.build_plan(home, configuration(home)))
+            control = helper('dsh-control')
+            with patch.dict('os.environ', {'HOME': str(home)}), patch.object(control, 'notify'), patch('sys.argv', ['dsh-control', 'research', 'update']):
+                with self.assertRaises(RuntimeError):
+                    control.main()
 
 
 if __name__ == '__main__':
