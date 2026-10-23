@@ -110,6 +110,20 @@ class ConfigTests(unittest.TestCase):
 
 
 class InstallTests(unittest.TestCase):
+    def test_startup_menu_and_units_for_each_target(self):
+        home = Path('/home/example')
+        settings = configuration(home)
+        entries = install.menu_entries(home, settings)
+        plan = install.build_plan(home, settings)
+        for target_id, target in targets(settings).items():
+            with self.subTest(target=target_id):
+                unit = target['unit']
+                self.assertEqual(entries[f'dsh.{target_id}.enable']['when'],
+                                 f'! systemctl --user is-enabled --quiet {unit}')
+                self.assertEqual(entries[f'dsh.{target_id}.disable']['when'],
+                                 f'systemctl --user is-enabled --quiet {unit}')
+                self.assertIn('[Install]\nWantedBy=default.target', plan[home / '.config/systemd/user' / unit])
+
     def test_jsonc_merge_preserves_unrelated_strings_and_comments(self):
         original = '''{
  // Keep personal shortcuts.
@@ -257,6 +271,18 @@ class InstallTests(unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
+    def test_enable_disable_only_change_named_target_startup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            install.apply_plan(install.build_plan(home, configuration(home)))
+            control = helper('dsh-control')
+            with patch.dict('os.environ', {'HOME': str(home)}), patch.object(control, 'run') as run, patch.object(control, 'notify'):
+                for action in ('enable', 'disable'):
+                    with patch('sys.argv', ['dsh-control', 'research', action]):
+                        control.main()
+                    run.assert_called_with('systemctl', '--user', action, 'dsh-tunnel-research.service')
+            self.assertEqual(run.call_count, 2)
+
     def test_webapp_token_uses_target_port_and_encodes_query_characters(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)

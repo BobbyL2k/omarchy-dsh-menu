@@ -88,6 +88,11 @@ def menu_entries(home, settings):
         for action, title in (('open', 'Open webapp'), ('start', 'Start service' if target_id == 'local' else 'Start tunnel'),
                               ('stop', 'Stop service' if target_id == 'local' else 'Stop tunnel'), ('logs', 'Logs')):
             entries[f'dsh.{target_id}.{action}'] = {'label': title, 'action': f'{control} {target_id} {action}'}
+        enabled = f"systemctl --user is-enabled --quiet {target['unit']}"
+        entries[f'dsh.{target_id}.enable'] = {'label': 'Enable at login', 'when': f'! {enabled}',
+                                                'action': f'{control} {target_id} enable'}
+        entries[f'dsh.{target_id}.disable'] = {'label': 'Disable at login', 'when': enabled,
+                                                 'action': f'{control} {target_id} disable'}
     return entries
 
 
@@ -103,7 +108,7 @@ def build_plan(home, settings, source_text=None):
     local_unit = '[Unit]\nDescription=DeepSeek Harness local web service\n\n[Service]\nType=exec\n'
     local_unit += 'WorkingDirectory=' + settings['local']['workdir'].replace('%', '%%') + '\n'
     local_unit += 'Environment=' + unit_quote('PATH=' + ':'.join(dict.fromkeys(paths)), environment=True) + '\n'
-    local_unit += 'ExecStart=' + ' '.join(map(unit_quote, command)) + '\nKillMode=control-group\nTimeoutStopSec=20\n'
+    local_unit += 'ExecStart=' + ' '.join(map(unit_quote, command)) + '\nKillMode=control-group\nTimeoutStopSec=20\n\n[Install]\nWantedBy=default.target\n'
     units = home / '.config/systemd/user'
     plan = {config_dir(home) / 'config.json': source_text if source_text is not None else json.dumps(settings, indent=2) + '\n',
             config_dir(home) / 'runtime.json': json.dumps(settings, indent=2) + '\n',
@@ -113,7 +118,7 @@ def build_plan(home, settings, source_text=None):
                    '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
                    '-L', f"127.0.0.1:{remote['local_port']}:localhost:{remote['remote_port']}", remote['ssh_host']]
         text = '[Unit]\nDescription=DeepSeek Harness SSH tunnel\n\n[Service]\nType=exec\n'
-        text += 'ExecStart=' + ' '.join(map(unit_quote, command)) + '\nKillMode=control-group\nTimeoutStopSec=10\n'
+        text += 'ExecStart=' + ' '.join(map(unit_quote, command)) + '\nKillMode=control-group\nTimeoutStopSec=10\n\n[Install]\nWantedBy=default.target\n'
         plan[units / f'dsh-tunnel-{target_id}.service'] = text
     mapping = {str(t['port']): {key: t[key] for key in ('label', 'detail', 'color', 'background')} for t in targets(settings).values()}
     plan[home / '.config/dsh-webapps/labels/targets.js'] = 'globalThis.DSH_MENU_TARGETS = ' + json.dumps(mapping, ensure_ascii=False) + ';\n'
@@ -175,7 +180,10 @@ def owned_units(home):
 
 def service_changes(home, plan, previous):
     desired = {p.name for p in plan if p.suffix == '.service'}
-    changed = {p.name for p, text in plan.items() if p.suffix == '.service' and (not p.exists() or p.read_text() != text)}
+    # [Install] only controls future enablement and needs a reload, not a restart.
+    runtime = lambda text: text.split('\n[Install]\n', 1)[0]
+    changed = {p.name for p, text in plan.items() if p.suffix == '.service' and
+               (not p.exists() or runtime(p.read_text()) != runtime(text))}
     return desired, changed, previous - desired
 
 

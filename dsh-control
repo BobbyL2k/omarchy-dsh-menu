@@ -86,8 +86,8 @@ def local_url():
 
 def main():
     available = configured_targets()
-    if len(sys.argv) != 3 or sys.argv[1] not in available or sys.argv[2] not in ("start", "stop", "open", "logs", "status"):
-        raise RuntimeError("Usage: dsh-control TARGET {start|stop|open|logs|status}. Targets: " + ", ".join(available))
+    if len(sys.argv) != 3 or sys.argv[1] not in available or sys.argv[2] not in ("start", "stop", "open", "logs", "status", "enable", "disable"):
+        raise RuntimeError("Usage: dsh-control TARGET {start|stop|open|logs|status|enable|disable}. Targets: " + ", ".join(available))
     target, action = sys.argv[1:]
     target_config = configured_targets()[target]
     unit, port = target_config["unit"], target_config["port"]
@@ -95,6 +95,9 @@ def main():
         print("running" if active(unit) else "stopped")
     elif action == "logs":
         run("omarchy-launch-terminal", "journalctl", "--user", "-u", unit, "-n", "60", "-f")
+    elif action in ("enable", "disable"):
+        run("systemctl", "--user", action, unit)
+        notify(f"{target_config['label']} {'enabled' if action == 'enable' else 'disabled'} at login.")
     elif action == "stop":
         run("systemctl", "--user", "stop", unit)
         notify(f"{target_config['label']} {'service' if target == 'local' else 'tunnel'} stopped.")

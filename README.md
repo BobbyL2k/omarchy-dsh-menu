@@ -2,7 +2,7 @@
 
 Desktop controls for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): manage a local DSH service and SSH tunnels to any number of remote instances, then open each connection in a named app window.
 
-Each target gets **Open webapp**, **Start**, **Stop**, and **Logs** actions. Persistent colored headers and window-title prefixes identify the connection, including during navigation and session changes.
+Each target gets **Open webapp**, **Start**, **Stop**, **Logs**, and login startup controls. Persistent colored headers and window-title prefixes identify the connection, including during navigation and session changes.
 
 ## Requirements
 
@@ -50,7 +50,7 @@ DeepSeek Harness
 └── Research
 ```
 
-Each submenu contains the same four controls. With no config file, the installer creates a local-only configuration. Installed files are independent copies, so the checkout can be moved afterward.
+Each submenu contains the same controls. With no config file, the installer creates a local-only configuration. Installed files are independent copies, so the checkout can be moved afterward.
 
 ## Configuration
 
@@ -188,8 +188,9 @@ An earlier managed tunnel unit is adopted from the existing app menu, backed up,
 | Start | Starts local DSH | Starts only that target's tunnel |
 | Stop | Stops local DSH and its child processes | Stops only that target's tunnel |
 | Logs | Opens local DSH logs | Opens that target's SSH tunnel logs |
+| Enable/Disable at login | Controls local service autostart | Controls tunnel autostart |
 
-A checkmark means the service or tunnel process is active, not that the remote server is continuously health-checked. Closing an app window leaves its service/tunnel running. Services are not enabled at login.
+A checkmark means the service or tunnel process is active, not that the remote server is continuously health-checked. Closing an app window leaves its service/tunnel running. Enable/Disable at login affects future logins without starting or stopping the current session. New targets are disabled by default.
 
 Headers reserve 32 pixels above DSH controls. Window titles also receive a prefix such as `[DSH · Research]`. Target names persist across page reloads and session changes.
 
@@ -204,9 +205,11 @@ dsh-control research open
 dsh-control research status
 dsh-control research logs
 dsh-control research stop
+dsh-control research enable
+dsh-control research disable
 ```
 
-Supported actions are `open`, `start`, `stop`, `status`, and `logs`. Running a command without valid arguments prints the available target IDs. Press **Ctrl + C** to stop watching logs. Logs can contain private DSH login URLs.
+Supported actions are `open`, `start`, `stop`, `status`, `logs`, `enable`, and `disable`. Running a command without valid arguments prints the available target IDs. Press **Ctrl + C** to stop watching logs. Logs can contain private DSH login URLs.
 
 ### Browser authentication
 
